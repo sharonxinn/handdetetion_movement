@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Mouth Open Firework Pop Demo</title>
+<style>
+body { margin:0; padding:0; width:100vw; height:100vh; overflow:hidden; display:flex; justify-content:center; align-items:center; background-color:transparent; }
+.wrapper { position:relative; width:100%; height:100%; overflow:hidden; }
+/* Ensure video and canvas are sized and flipped correctly */
+#videoEl { position:absolute; width:100%; height:100%; object-fit:cover; transform:scaleX(-1); }
+#drawCanvas { position:absolute; top:0; left:0; width:100%; height:100%; transform:scaleX(-1); pointer-events:none; }
+#threeDiv { position:absolute; top:0; left:0; width:100%; height:100%; pointer-events:none; z-index:5; }
+#info { position:absolute; top:20px; left:20px; color:#fff; background-color:rgba(0,0,0,0.5); padding:10px; border-radius:5px; font-family:Arial,sans-serif; z-index:10; }
+</style>
+</head>
+<body>
+<div class="wrapper">
+    <video id="videoEl" autoplay playsinline muted></video>
+    <canvas id="drawCanvas"></canvas>
+    <div id="threeDiv"></div>
+    <div id="info">Loading...</div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/face_mesh.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+
+<script>
+document.addEventListener('DOMContentLoaded',async ()=>{
+
+const vid=document.getElementById('videoEl');
+const canvas=document.getElementById('drawCanvas');
+const ctx=canvas.getContext('2d');
+const statusEl=document.getElementById('info'); 
+const threeWrapper=document.getElementById('threeDiv');
+
+let scene3,camera3,renderer3;
+let particleSystem; 
+let particles = []; // Array to manage individual particle states
+
+// Face Mesh Landmark Indices for inner mouth center points
+const TOP_LIP_INNER = 13; 
+const BOTTOM_LIP_INNER = 14; 
+const MOUTH_OPEN_THRESHOLD = 0.03; 
+
+let mouthOpen = false; // Track if mouth is currently open
+const gravity = new THREE.Vector3(0, -0.01, 0); // Simple gravity
+
+// --- Layout and Camera Setup ---
+
+function resizeCanvas(){ canvas.width=window.innerWidth; canvas.height=window.innerHeight; }
+function setupLayout(){ resizeCanvas(); }
+window.addEventListener('resize',()=>{ setupLayout(); if(renderer3){renderer3.setSize(window.innerWidth,window.innerHeight);} if(camera3){camera3.aspect=window.innerWidth/window.innerHeight; camera3.updateProjectionMatrix();} });
+setupLayout();
+
+async function initCamera(){
+    try {
+        const stream=await navigator.mediaDevices.getUserMedia({video:{width:{ideal:1280},height:{ideal:720},facingMode:'user'}});
+        vid.srcObject=stream;
+        return new Promise(res=>{vid.onloadedmetadata=()=>{setupLayout(); res(vid);};});
+    } catch (e) {
+        statusEl.textContent = `Camera Error: ${e.message}. Please allow camera access.`;
+        throw e;
+    }
+}
+
+function initThree(){
+    scene3=new THREE.Scene();
+    camera3=new THREE.PerspectiveCamera(75,window.innerWidth/window.innerHeight,0.1,1000);
+    camera3.position.z=10;
+    renderer3=new THREE.WebGLRenderer({antialias:true, alpha:true});
+    renderer3.setSize(window.innerWidth,window.innerHeight);
+    renderer3.setClearColor(0x000000,0);
+    threeWrapper.appendChild(renderer3.domElement);
+
+    // Setup particle system geometry (initially empty)
+    const geometry = new THREE.BufferGeometry();
+    const material = new THREE.PointsMaterial({
+        size: 0.2,
+        vertexColors: true,
+        transparent: true,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false 
+    });
+    particleSystem = new THREE.Points(geometry, material);
+    scene3.add(particleSystem);
+
+    tick();
+}
+
+// --- Firework Burst Logic ---
+
+function createFireworkBurst(positionX, positionY, numParticles = 150, color = 0xffffff) {
+    const burstColor = new THREE.Color(color);
+    
+    // Clear existing particles if the burst is meant to be instantaneous
+    // NOTE: For continuous fireworks, remove this line
+    particles.length = 0; 
+
+    for (let i = 0; i < numParticles; i++) {
+        const x = positionX;
+        const y = positionY;
+        const z = (Math.random() - 0.5) * 0.5;
+
+        // Generate random velocity for a spherical explosion
+        const speed = 0.5 + Math.random() * 0.5;
+        const angleX = Math.random() * Math.PI * 2;
+        const angleY = Math.random() * Math.PI * 2;
+        const velocity = new THREE.Vector3(
+            Math.cos(angleX) * Math.sin(angleY) * speed,
+            Math.sin(angleX) * Math.sin(angleY) * speed,
+            Math.cos(angleY) * speed
+        );
+
+        particles.push({
+            position: new THREE.Vector3(x, y, z),
+            velocity: velocity,
+            life: 1.0, 
+            color: burstColor.clone(),
+            originalColor: burstColor.clone(),
+        });
+    }
+}
+
+// --- Animation Loop (Correction Applied Here) ---
+
+function tick(){
+    requestAnimationFrame(tick);
+
+    // Temp arrays to hold positions and colors of LIVE particles
+    const tempPositions = [];
+    const tempColors = [];
+    
+    // Iterate backwards to safely remove dead particles
+    for (let i = particles.length - 1; i >= 0; i--) {
+        const p = particles[i];
+
+        p.velocity.add(gravity); 
+        p.position.add(p.velocity); 
+        
+        p.life -= 0.02; // Decrease life
+        
+        if (p.life <= 0) {
+            particles.splice(i, 1); // Remove dead particles
+            continue; 
+        }
+
+        // Fade particle color from original to black (simulating fade-out/opacity loss)
+        p.color.lerpColors(p.originalColor, new THREE.Color(0x000000), 1 - p.life);
+        
+        // Push data for live particles
+        tempPositions.push(p.position.x, p.position.y, p.position.z);
+        tempColors.push(p.color.r, p.color.g, p.color.b);
+    }
+
+    // ⭐ CRITICAL CORRECTION: Re-create BufferAttributes from the live particle data
+    // This ensures the geometry is always correctly defined, preventing the "Cannot read properties of undefined" error.
+    if (tempPositions.length > 0) {
+        particleSystem.geometry.setAttribute('position', new THREE.Float32BufferAttribute(tempPositions, 3));
+        particleSystem.geometry.setAttribute('color', new THREE.Float32BufferAttribute(tempColors, 3));
+    } else {
+        // If no particles, set empty attributes to avoid errors in next frame
+        particleSystem.geometry.setAttribute('position', new THREE.Float32BufferAttribute([], 3));
+        particleSystem.geometry.setAttribute('color', new THREE.Float32BufferAttribute([], 3));
+    }
+    
+    particleSystem.geometry.attributes.position.needsUpdate = true;
+    particleSystem.geometry.attributes.color.needsUpdate = true;
+    
+    renderer3.render(scene3,camera3);
+}
+
+// --- Face Mesh Detection Logic ---
+
+function dist3(p1,p2){ const dx=p1.x-p2.x, dy=p1.y-p2.y, dz=(p1.z||0)-(p2.z||0); return Math.sqrt(dx*dx+dy*dy+dz*dz); }
+
+async function setupFaceMesh(){
+    statusEl.textContent='Loading Face Mesh...';
+    const faceMesh=new FaceMesh({locateFile:file=>`https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/${file}`});
+    faceMesh.setOptions({
+        maxNumFaces:1,
+        refineLandmarks:true,
+        minDetectionConfidence:0.5,
+        minTrackingConfidence:0.5
+    });
+    await faceMesh.initialize();
+    statusEl.textContent='Face Mesh ready';
+    return faceMesh;
+}
+
+function processFaceMesh(results){
+    ctx.clearRect(0,0,canvas.width,canvas.height);
+    if(results.multiFaceLandmarks && results.multiFaceLandmarks.length>0){
+        
+        const faceLm = results.multiFaceLandmarks[0];
+        const topLip = faceLm[TOP_LIP_INNER];
+        const bottomLip = faceLm[BOTTOM_LIP_INNER];
+
+        const mouthDistance = dist3(topLip, bottomLip);
+        const isMouthOpen = mouthDistance > MOUTH_OPEN_THRESHOLD;
+
+        if (isMouthOpen && !mouthOpen) { 
+            statusEl.textContent = `Mouth Open! Burst! Distance: ${mouthDistance.toFixed(3)}`;
+            mouthOpen = true;
+
+            // Map normalized coordinates (0 to 1) to THREE.js world space
+            const x = (topLip.x - 0.5) * -20; // Negate X for flipped video
+            const y = (topLip.y - 0.5) * -20;
+
+            const randomColor = Math.floor(Math.random()*16777215); 
+            createFireworkBurst(x, y, 150, randomColor); 
+
+        } else if (!isMouthOpen && mouthOpen) {
+            statusEl.textContent = `Mouth Closed. Distance: ${mouthDistance.toFixed(3)}`;
+            mouthOpen = false;
+        }
+
+    } else { 
+        statusEl.textContent='No face detected';
+        mouthOpen = false; 
+    }
+}
+
+async function runApp(){
+    try{
+        await initCamera();
+        vid.play(); 
+        initThree();
+        const faceMesh=await setupFaceMesh(); 
+        faceMesh.onResults(processFaceMesh);
+        const camMP=new Camera(vid,{onFrame:async()=>{await faceMesh.send({image:vid});}, width:1280,height:720});
+        camMP.start();
+    }catch(e){ statusEl.textContent=`Initialization Error: ${e.message}`; console.error(e);}
+}
+
+runApp();
+});
+</script>
+</body>
+</html>
